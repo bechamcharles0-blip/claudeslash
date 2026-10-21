@@ -10,23 +10,33 @@
     "start": "node dist/server.js",
     "cli": "node dist/cli/index.js",
     "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest --coverage",
+    "test:integration": "vitest src/integration.test.ts",
+    "test:watch": "vitest --watch",
+    "load-test": "node --loader tsx/esm src/loadTest.ts",
     "dashboard": "node dist/dashboard/server.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.24.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "graphql": "^16.8.1",
     "graphql-http": "^1.22.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
+    "pg": "^8.23.1",
     "redis": "^4.6.12",
     "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.10.6",
-    "typescript": "^5.3.3",
+    "@types/supertest": "^2.0.12",
+    "@vitest/ui": "^1.1.0",
+    "supertest": "^6.3.3",
+    "ts-node": "^10.9.2",
     "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
     "vitest": "^1.1.0"
   },
   "engines": {

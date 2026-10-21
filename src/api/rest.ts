@@ -12,7 +12,7 @@ export const createRestAPI = (router: ModelRouter) => {
   app.post('/route', async (req: Request, res: Response) => {
     try {
       const userId = req.headers['x-user-id'] as string || 'anonymous';
-      const { task, budget, minQuality, allowedModels } = req.body as RouteRequest;
+      const { task, budget, minQuality, allowedModels, userPreference } = req.body as RouteRequest;
 
       // Security: Validate input
       const validation = securityManager.validateInput(task);
@@ -33,12 +33,13 @@ export const createRestAPI = (router: ModelRouter) => {
         return res.status(403).json({ error: 'Request blocked due to unusual pattern' });
       }
 
-      // Route the request
+      // Route the request (with optional user preference)
       const result = await router.route({
         task,
         budget: budget || 100000,
         minQuality: minQuality || 5,
         allowedModels: allowedModels || ['haiku', 'sonnet', 'opus'],
+        userPreference, // NEW: Pass user preference (fast/cheap/quality)
       });
 
       // Security: Sanitize output
@@ -98,7 +99,7 @@ export const createRestAPI = (router: ModelRouter) => {
   });
 
   /**
-   * POST /api/token-estimate - Estimate tokens before execution
+   * POST /api/token-estimate - Count tokens using real Claude API
    */
   app.post('/token-estimate', async (req: Request, res: Response) => {
     try {
@@ -109,7 +110,7 @@ export const createRestAPI = (router: ModelRouter) => {
         return res.status(400).json({ error: validation.reason });
       }
 
-      const tokens = await router.estimateTokens(task, (model || 'haiku') as any);
+      const tokens = await router.countTokens(task, (model || 'haiku') as any);
       const models = router.getModels();
       const selectedModel = models[(model || 'haiku') as any];
 
@@ -122,25 +123,104 @@ export const createRestAPI = (router: ModelRouter) => {
         estimatedTokens: tokens,
         estimatedCost,
         model: model || 'haiku',
+        method: 'real_counting',
+        source: 'claude_api',
       });
     } catch (error) {
-      return res.status(500).json({ error: 'Failed to estimate tokens' });
+      return res.status(500).json({ error: 'Failed to count tokens' });
     }
   });
 
   /**
-   * GET /api/stats - Get router statistics
+   * POST /api/analyze-complexity - Analyze task complexity
    */
-  app.get('/stats', (req: Request, res: Response) => {
-    const stats = router.getStats();
-    return res.json({
-      totalRequests: stats.totalRequests,
-      totalTokensSaved: stats.totalTokensSaved,
-      totalCostSaved: `$${stats.totalCostSaved.toFixed(2)}`,
-      modelDistribution: stats.modelUsage,
-      averageQuality: stats.averageQuality,
-      escalationRate: `${(stats.escalationRate * 100).toFixed(1)}%`,
-    });
+  app.post('/complexity-analysis', async (req: Request, res: Response) => {
+    try {
+      const { task } = req.body;
+
+      const validation = securityManager.validateInput(task);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.reason });
+      }
+
+      const tokenCounter = router.getTokenCounter();
+      const inputTokens = await tokenCounter.countTokens(task, 'haiku');
+
+      return res.json({
+        message: 'Complexity analysis endpoint prepared',
+        inputTokens: inputTokens.input,
+        note: 'Full complexity analysis will be available with ComplexityAnalyzer integration',
+      });
+    } catch (error) {
+      return res.status(500).json({ error: 'Failed to analyze complexity' });
+    }
+  });
+
+  /**
+   * POST /api/feedback - Record feedback for learning
+   */
+  app.post('/feedback', async (req: Request, res: Response) => {
+    try {
+      const userId = req.headers['x-user-id'] as string || 'anonymous';
+      const { taskHash, model, success, qualityScore, escalationReason } = req.body;
+
+      if (!taskHash || !model) {
+        return res.status(400).json({ error: 'taskHash and model are required' });
+      }
+
+      router.recordFeedback(taskHash, model as any, success, qualityScore, escalationReason);
+
+      return res.json({
+        message: 'Feedback recorded successfully',
+        taskHash,
+        model,
+        success,
+        userId,
+      });
+    } catch (error) {
+      return res.status(500).json({ error: 'Failed to record feedback' });
+    }
+  });
+
+  /**
+   * GET /api/stats - Get comprehensive router statistics (cached, <100ms)
+   * NEW (Tier 2 Phase 2B): Uses Redis-backed metrics cache
+   */
+  app.get('/stats', async (req: Request, res: Response) => {
+    try {
+      const startTime = Date.now();
+      const cachedMetrics = await router.getCachedMetrics();
+
+      return res.json({
+        totalRequests: cachedMetrics.totalRequests,
+        totalTokensSaved: cachedMetrics.totalTokensSaved,
+        totalCostSaved: `$${cachedMetrics.totalCostSaved.toFixed(2)}`,
+        modelDistribution: cachedMetrics.modelDistribution,
+        averageQuality: cachedMetrics.averageQuality.toFixed(2),
+        escalationRate: `${(cachedMetrics.escalationRate * 100).toFixed(1)}%`,
+        validationRate: `${cachedMetrics.validationRate.toFixed(1)}%`,
+        sparklines: cachedMetrics.sparklines,
+        cacheInfo: {
+          cacheHit: cachedMetrics.cacheHit,
+          responseTimeMs: Date.now() - startTime,
+          lastUpdated: new Date(cachedMetrics.lastUpdated).toISOString(),
+          nextUpdate: new Date(cachedMetrics.nextUpdate).toISOString(),
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('Failed to get cached stats:', error);
+      // Fallback to non-cached stats
+      const stats = router.getStats();
+      return res.json({
+        totalRequests: stats.totalRequests,
+        totalTokensSaved: stats.totalTokensSaved,
+        totalCostSaved: `$${stats.totalCostSaved.toFixed(2)}`,
+        modelDistribution: stats.modelUsage,
+        timestamp: new Date().toISOString(),
+        error: 'Cache unavailable, returned non-cached metrics',
+      });
+    }
   });
 
   /**
@@ -164,6 +244,96 @@ export const createRestAPI = (router: ModelRouter) => {
       ],
       totalSavingsTarget: '30-50%',
     });
+  });
+
+  /**
+   * GET /api/dashboard - Get dashboard data with sparklines (NEW: Tier 2 Phase 2B real-time)
+   */
+  app.get('/dashboard', async (req: Request, res: Response) => {
+    try {
+      const startTime = Date.now();
+      const metrics = await router.getCachedMetrics();
+      const cacheStats = router.getMetricsCacheStats();
+
+      return res.json({
+        summary: {
+          totalRequests: metrics.totalRequests,
+          totalTokensSaved: metrics.totalTokensSaved,
+          totalCostSaved: metrics.totalCostSaved,
+          averageQuality: metrics.averageQuality,
+          escalationRate: metrics.escalationRate,
+          validationRate: metrics.validationRate,
+        },
+        sparklines: metrics.sparklines,
+        cache: {
+          hitRate: `${cacheStats.snapshotCount}/${cacheStats.cacheSize} snapshots`,
+          responseTimeMs: Date.now() - startTime,
+          isStale: cacheStats.isStale,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      return res.status(500).json({
+        error: 'Failed to fetch dashboard data',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
+
+  /**
+   * GET /api/data-quality - Get data quality metrics (Tier 2 Phase 2A measurement infrastructure)
+   */
+  app.get('/data-quality', (req: Request, res: Response) => {
+    try {
+      const metrics = router.getDataQualityMetrics();
+      const report = router.getDataQualityReport();
+
+      return res.json({
+        metrics,
+        report,
+        status:
+          metrics.validationRate >= 99
+            ? 'healthy'
+            : metrics.validationRate >= 95
+              ? 'warning'
+              : 'critical',
+        message:
+          metrics.validationRate >= 99
+            ? 'Data quality is excellent'
+            : metrics.validationRate >= 95
+              ? 'Data quality has some issues - investigate errors'
+              : 'Data quality is critical - immediate attention required',
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('Failed to get data quality metrics:', error);
+      return res.status(500).json({
+        error: 'Failed to retrieve data quality metrics',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
+
+  /**
+   * GET /api/data-quality/reset - Reset data quality metrics (admin endpoint)
+   */
+  app.get('/data-quality/reset', (req: Request, res: Response) => {
+    try {
+      // Simple admin check - in production, use proper auth
+      const adminKey = req.headers['x-admin-key'];
+      if (adminKey !== process.env.ADMIN_KEY && process.env.ADMIN_KEY) {
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+
+      router.resetQualityMetrics();
+
+      return res.json({
+        message: 'Data quality metrics reset successfully',
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      return res.status(500).json({ error: 'Failed to reset metrics' });
+    }
   });
 
   /**

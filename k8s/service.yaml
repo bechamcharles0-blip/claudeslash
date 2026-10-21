@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-router-api
+  namespace: claude-router
+  labels:
+    app: claude-router-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: claude-router-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: 3000
+    protocol: TCP
+  sessionAffinity: None
+  # For production, change to ClusterIP and use Ingress
+  # type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-router-internal
+  namespace: claude-router
+  labels:
+    app: claude-router-api
+spec:
+  type: ClusterIP
+  selector:
+    app: claude-router-api
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+    protocol: TCP

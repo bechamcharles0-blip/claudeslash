@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: claude-router
+  labels:
+    name: claude-router
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: claude-router-monitoring
+  labels:
+    name: claude-router-monitoring

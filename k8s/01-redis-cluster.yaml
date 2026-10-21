@@ -1,0 +1,256 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-cluster-config
+  namespace: claude-router
+data:
+  redis.conf: |
+    # Redis Cluster Configuration (Production)
+    port 6379
+    cluster-enabled yes
+    cluster-node-timeout 5000
+    cluster-replica-validity-factor 10
+    # Persistence
+    save 900 1
+    save 300 10
+    save 60 10000
+    appendonly yes
+    appendfsync everysec
+    # Memory management
+    maxmemory-policy allkeys-lru
+    maxmemory 400mb
+    # Optimization
+    tcp-keepalive 60
+    timeout 0
+    databases 16
+    # AOF rewrite
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-cluster-secret
+  namespace: claude-router
+type: Opaque
+stringData:
+  redis-password: "change-this-in-production-use-strong-password"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-cluster
+  namespace: claude-router
+  labels:
+    app: redis-cluster
+spec:
+  serviceName: redis-cluster
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis-cluster
+  template:
+    metadata:
+      labels:
+        app: redis-cluster
+        component: redis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - redis-cluster
+            topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+      - name: redis
+        image: redis:7.0-alpine
+        command:
+          - redis-server
+          - /etc/redis-cluster/redis.conf
+          - --cluster-announce-ip
+          - $(POD_IP)
+          - --requirepass
+          - $(REDIS_PASSWORD)
+          - --masterauth
+          - $(REDIS_PASSWORD)
+        ports:
+        - name: client
+          containerPort: 6379
+        - name: gossip
+          containerPort: 16379
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-cluster-secret
+              key: redis-password
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -a
+            - $(REDIS_PASSWORD)
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -a
+            - $(REDIS_PASSWORD)
+            - ping
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        - name: redis-config
+          mountPath: /etc/redis-cluster
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-cluster-config
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster
+  namespace: claude-router
+  labels:
+    app: redis-cluster
+spec:
+  clusterIP: None
+  selector:
+    app: redis-cluster
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: client
+  - port: 16379
+    targetPort: 16379
+    name: gossip
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster-lb
+  namespace: claude-router
+  labels:
+    app: redis-cluster
+spec:
+  type: ClusterIP
+  selector:
+    app: redis-cluster
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: client
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-cluster-init
+  namespace: claude-router
+spec:
+  template:
+    spec:
+      serviceAccountName: redis-cluster
+      containers:
+      - name: redis-cli
+        image: redis:7.0-alpine
+        command:
+        - /bin/sh
+        - -c
+        - |
+          REDIS_PASSWORD=$(cat /var/run/secrets/redis-password)
+          echo "Waiting for all Redis pods to be ready..."
+          sleep 30
+          echo "Initializing Redis Cluster..."
+          redis-cli -a "$REDIS_PASSWORD" --cluster create \
+            redis-cluster-0.redis-cluster:6379 \
+            redis-cluster-1.redis-cluster:6379 \
+            redis-cluster-2.redis-cluster:6379 \
+            redis-cluster-3.redis-cluster:6379 \
+            redis-cluster-4.redis-cluster:6379 \
+            redis-cluster-5.redis-cluster:6379 \
+            --cluster-replicas 1 --cluster-yes \
+            && echo "Cluster initialized successfully" || echo "Cluster may already exist"
+        volumeMounts:
+        - name: redis-password
+          mountPath: /var/run/secrets
+          readOnly: true
+      volumes:
+      - name: redis-password
+        secret:
+          secretName: redis-cluster-secret
+          items:
+          - key: redis-password
+            path: redis-password
+      restartPolicy: Never
+  backoffLimit: 5
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redis-cluster
+  namespace: claude-router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: redis-cluster
+  namespace: claude-router
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: redis-cluster
+  namespace: claude-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: redis-cluster
+subjects:
+- kind: ServiceAccount
+  name: redis-cluster
+  namespace: claude-router

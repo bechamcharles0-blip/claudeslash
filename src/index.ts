@@ -1,6 +1,10 @@
 // Core exports
 export { ModelRouter } from './core/modelRouter.js';
 export { securityManager, SecurityManager } from './core/security.js';
+export { TokenCounter } from './core/tokenCounter.js';
+export { ComplexityAnalyzer } from './core/complexityAnalyzer.js';
+export { ModelSelector } from './core/modelSelector.js';
+export { FeedbackLoop } from './core/feedbackLoop.js';
 
 // Type exports
 export type {
@@ -12,6 +16,9 @@ export type {
   SecurityContext,
   CacheEntry,
   RouterStats,
+  TokenCountResponse,
+  ComplexityScore,
+  FeedbackInput,
 } from './types/index.js';
 
 // API exports

@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-router-config
+  namespace: claude-router
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+  REDIS_URL: "redis://:redis-password@redis:6379"
+  # Rate limiting configuration
+  RATE_LIMIT_PER_HOUR: "1000"
+  RATE_LIMIT_PER_DAY: "10000"
+  RATE_LIMIT_PER_MINUTE: "50"
+  # Model configuration
+  DEFAULT_MODEL: "haiku"
+  ALLOWED_MODELS: "haiku,sonnet,opus,fable"
+  # Cache configuration
+  CACHE_TTL_SECONDS: "3600"
+  CACHE_MAX_SIZE_MB: "500"
+  # Monitoring
+  METRICS_ENABLED: "true"
+  TRACING_ENABLED: "true"
+  JAEGER_AGENT_HOST: "jaeger.monitoring.svc.cluster.local"
+  JAEGER_AGENT_PORT: "6831"

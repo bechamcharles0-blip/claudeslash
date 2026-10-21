@@ -1,0 +1,11 @@
+# Pod Disruption Budget - ensures availability during cluster maintenance
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claude-router-api-pdb
+  namespace: claude-router
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: claude-router-api

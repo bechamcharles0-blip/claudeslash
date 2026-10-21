@@ -1,0 +1,268 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-config
+  namespace: claude-router
+data:
+  init-db.sql: |
+    -- Analytics database initialization
+    CREATE DATABASE claude_router_analytics OWNER postgres;
+
+    -- Connect to the analytics database
+    \c claude_router_analytics
+
+    -- Create extensions
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+
+    -- Analytics events table (main data store)
+    CREATE TABLE IF NOT EXISTS analytics_events (
+      event_id VARCHAR(32) PRIMARY KEY,
+      request_id VARCHAR(32) NOT NULL,
+      user_id VARCHAR(255) NOT NULL,
+      timestamp BIGINT NOT NULL,
+      type VARCHAR(50) NOT NULL,
+      version VARCHAR(10),
+      task TEXT,
+      task_length INT,
+      task_category VARCHAR(100),
+      budget INT,
+      min_quality DECIMAL(3,1),
+      selected_model VARCHAR(20),
+      selected_effort VARCHAR(20),
+      selection_reason TEXT,
+      tokens_estimated INT,
+      tokens_input INT,
+      tokens_output INT,
+      tokens_cached INT,
+      execution_time_ms INT,
+      cost_estimated DECIMAL(10,6),
+      cost_actual DECIMAL(10,6),
+      cost_baseline DECIMAL(10,6),
+      tokens_saved INT,
+      percent_saved DECIMAL(5,2),
+      quality_estimate DECIMAL(3,1),
+      cache_hit BOOLEAN,
+      escalated BOOLEAN,
+      escalation_reason TEXT,
+      error BOOLEAN,
+      error_code VARCHAR(50),
+      error_message TEXT,
+      security_score DECIMAL(3,0),
+      security_flags TEXT[],
+      rate_limit INT,
+      request_count_this_hour INT,
+      api_version VARCHAR(20),
+      region VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Create indexes for common queries
+    CREATE INDEX idx_analytics_events_timestamp ON analytics_events(timestamp);
+    CREATE INDEX idx_analytics_events_user_id ON analytics_events(user_id);
+    CREATE INDEX idx_analytics_events_selected_model ON analytics_events(selected_model);
+    CREATE INDEX idx_analytics_events_type ON analytics_events(type);
+    CREATE INDEX idx_analytics_events_created_at ON analytics_events(created_at);
+
+    -- User feedback table
+    CREATE TABLE IF NOT EXISTS user_feedback (
+      feedback_id VARCHAR(32) PRIMARY KEY,
+      event_id VARCHAR(32) REFERENCES analytics_events(event_id),
+      user_id VARCHAR(255) NOT NULL,
+      feedback_type VARCHAR(50),
+      quality_rating INT,
+      latency_satisfactory BOOLEAN,
+      model_suggestion VARCHAR(20),
+      notes TEXT,
+      timestamp BIGINT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX idx_user_feedback_event_id ON user_feedback(event_id);
+    CREATE INDEX idx_user_feedback_user_id ON user_feedback(user_id);
+
+    -- Model performance metrics (hourly aggregates)
+    CREATE TABLE IF NOT EXISTS model_performance_hourly (
+      id SERIAL PRIMARY KEY,
+      model VARCHAR(20) NOT NULL,
+      hour TIMESTAMP NOT NULL,
+      total_requests INT DEFAULT 0,
+      avg_tokens_saved DECIMAL(8,2) DEFAULT 0,
+      avg_cost_saved DECIMAL(10,6) DEFAULT 0,
+      avg_execution_time_ms DECIMAL(8,2) DEFAULT 0,
+      avg_quality_estimate DECIMAL(3,1) DEFAULT 0,
+      cache_hit_rate DECIMAL(5,2) DEFAULT 0,
+      error_rate DECIMAL(5,2) DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX idx_model_performance_model ON model_performance_hourly(model);
+    CREATE INDEX idx_model_performance_hour ON model_performance_hourly(hour);
+
+    -- Route performance metrics
+    CREATE TABLE IF NOT EXISTS route_performance (
+      id SERIAL PRIMARY KEY,
+      route_name VARCHAR(255) NOT NULL,
+      method VARCHAR(10) NOT NULL,
+      hour TIMESTAMP NOT NULL,
+      total_requests INT DEFAULT 0,
+      avg_response_time_ms DECIMAL(8,2) DEFAULT 0,
+      p99_response_time_ms DECIMAL(8,2) DEFAULT 0,
+      error_count INT DEFAULT 0,
+      success_rate DECIMAL(5,2) DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX idx_route_performance_route ON route_performance(route_name);
+    CREATE INDEX idx_route_performance_hour ON route_performance(hour);
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: claude-router
+type: Opaque
+stringData:
+  postgres-user: postgres
+  postgres-password: "change-this-production-use-strong-password"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: claude-router
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: claude-router
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: postgres
+        component: database
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - claude-router-api
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - name: postgres
+          containerPort: 5432
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: postgres-user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: postgres-password
+        - name: POSTGRES_DB
+          value: claude_router
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U postgres
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U postgres
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        - name: init-db
+          mountPath: /docker-entrypoint-initdb.d
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: init-db
+        configMap:
+          name: postgres-init-config
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: claude-router
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  namespace: claude-router
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: postgres

@@ -1,0 +1,253 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-router-config
+  namespace: claude-router
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+  REDIS_CLUSTER_ENABLED: "true"
+  REDIS_NODES: "redis-cluster-0.redis-cluster:6379,redis-cluster-1.redis-cluster:6379,redis-cluster-2.redis-cluster:6379"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "claude_router_analytics"
+  POSTGRES_POOL_SIZE: "20"
+  POSTGRES_IDLE_TIMEOUT_MS: "30000"
+  RATE_LIMIT_PER_HOUR: "10000"
+  RATE_LIMIT_PER_DAY: "100000"
+  RATE_LIMIT_PER_MINUTE: "100"
+  DEFAULT_MODEL: "haiku"
+  ALLOWED_MODELS: "haiku,sonnet,opus,fable"
+  CACHE_TTL_SECONDS: "3600"
+  CACHE_MAX_SIZE_MB: "500"
+  METRICS_ENABLED: "true"
+  TRACING_ENABLED: "true"
+  JAEGER_AGENT_HOST: "jaeger.claude-router-monitoring.svc.cluster.local"
+  JAEGER_AGENT_PORT: "6831"
+  HEALTH_CHECK_INTERVAL_MS: "30000"
+  GRACEFUL_SHUTDOWN_TIMEOUT_MS: "30000"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claude-router-secrets
+  namespace: claude-router
+type: Opaque
+stringData:
+  ANTHROPIC_API_KEY: "sk-ant-REPLACE_WITH_ACTUAL_KEY"
+  REDIS_PASSWORD: "change-this-in-production-use-strong-password"
+  POSTGRES_USER: "postgres"
+  POSTGRES_PASSWORD: "change-this-in-production-use-strong-password"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-router-api
+  namespace: claude-router
+  labels:
+    app: claude-router-api
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: claude-router-api
+  template:
+    metadata:
+      labels:
+        app: claude-router-api
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: claude-router-api
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - claude-router-api
+              topologyKey: kubernetes.io/hostname
+          - weight: 50
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - claude-router-api
+              topologyKey: topology.kubernetes.io/zone
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: claude-router-api
+      containers:
+      - name: claude-router
+        image: claude-router:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: claude-router-config
+        env:
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: claude-router-secrets
+              key: ANTHROPIC_API_KEY
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: claude-router-secrets
+              key: REDIS_PASSWORD
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: claude-router-secrets
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: claude-router-secrets
+              key: POSTGRES_PASSWORD
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+            ephemeral-storage: "500Mi"
+          limits:
+            memory: "1Gi"
+            cpu: "2000m"
+            ephemeral-storage: "1Gi"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+            httpHeaders:
+            - name: Accept
+              value: application/json
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+            httpHeaders:
+            - name: Accept
+              value: application/json
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          failureThreshold: 10
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /tmp/cache
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 15 && exec /bin/sh -c 'kill -TERM 1'"]
+      initContainers:
+      - name: wait-for-postgres
+        image: busybox:1.35
+        command: ['sh', '-c', 'until wget --spider -q http://postgres:5432 2>/dev/null || echo "Waiting for postgres"; do sleep 2; done']
+      - name: wait-for-redis
+        image: busybox:1.35
+        command: ['sh', '-c', 'until nc -z redis-cluster-0.redis-cluster 6379 2>/dev/null && nc -z redis-cluster-1.redis-cluster 6379 2>/dev/null; do echo "Waiting for Redis Cluster"; sleep 2; done']
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir:
+          sizeLimit: 2Gi
+      terminationGracePeriodSeconds: 45
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claude-router-api
+  namespace: claude-router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claude-router-api
+  namespace: claude-router
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claude-router-api
+  namespace: claude-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claude-router-api
+subjects:
+- kind: ServiceAccount
+  name: claude-router-api
+  namespace: claude-router
